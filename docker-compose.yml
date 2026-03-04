@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: analytics_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: analytics_pass
+      POSTGRES_DB: analytics_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
