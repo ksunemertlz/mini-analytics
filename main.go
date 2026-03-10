@@ -1,10 +1,13 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"time"
+	"strconv"
+
+	_ "github.com/lib/pq"
 )
 
 type Event struct {
@@ -15,16 +18,21 @@ type Event struct {
 	Timestamp string `json:"timestamp"`
 }
 
-var events []Event
-
 func main() {
+
+	// подключение к БД
+	connStr := "host=localhost port=5432 user=postgres password=postgres dbname=analytics sslmode=disable"
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		panic(err)
+	}
+
+	defer db.Close()
+
 	fmt.Println("Сервер запустился")
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println("Кто-то зашёл на сайт")
-		fmt.Fprintln(w, "Привет! Всё работает.")
-	})
-
+	// POST /event
 	http.HandleFunc("/event", func(w http.ResponseWriter, r *http.Request) {
 
 		if r.Method != http.MethodPost {
@@ -41,92 +49,186 @@ func main() {
 		}
 
 		if event.EventType == "" {
-			http.Error(w, "Error 400", http.StatusBadRequest)
+			http.Error(w, "event_type required", http.StatusBadRequest)
 			return
 		}
 
-		event.Id = len(events) + 1
-		event.Timestamp = time.Now().Format(time.RFC3339)
+		err = db.QueryRow(
+			"INSERT INTO event (user_id, event_type, page) VALUES ($1,$2,$3) RETURNING id, timestamp",
+			event.UserID,
+			event.EventType,
+			event.Page,
+		).Scan(&event.Id, &event.Timestamp)
 
-		events = append(events, event)
-		fmt.Println("Получили событие:", event)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(event)
 
 	})
 
+	// GET /events
 	http.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+
 		if r.Method != http.MethodGet {
-			http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
+			http.Error(w, "Only GET allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		rows, err := db.Query("SELECT id,user_id,event_type,page,timestamp FROM event")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		defer rows.Close()
+
+		var events []Event
+
+		for rows.Next() {
+
+			var e Event
+
+			err := rows.Scan(
+				&e.Id,
+				&e.UserID,
+				&e.EventType,
+				&e.Page,
+				&e.Timestamp,
+			)
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			events = append(events, e)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(events)
-	})
-
-	http.HandleFunc("/event_by_id", func(w http.ResponseWriter, r *http.Request) {
-
-		if r.Method != http.MethodGet {
-			http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		idStr := r.URL.Query().Get("id")
-		if idStr == "" {
-			http.Error(w, "id is required", http.StatusBadRequest)
-			return
-		}
-
-		var foundEvent *Event
-
-		for i := range events {
-			if fmt.Sprint(events[i].Id) == idStr {
-				foundEvent = &events[i]
-				break
-			}
-		}
-
-		if foundEvent == nil {
-			http.Error(w, "Event not found", http.StatusNotFound)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(foundEvent)
 
 	})
 
+	// GET /event_by_id?id=1
+	// DELETE /event_by_id?id=1
 	http.HandleFunc("/event_by_id", func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method != http.MethodDelete {
-			http.Error(w, "only DELETE allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
 		idStr := r.URL.Query().Get("id")
+
 		if idStr == "" {
-			http.Error(w, "id is required", http.StatusBadRequest)
+			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
 
-		deleted := false
-		for i := range events {
-			if fmt.Sprint(events[i].Id) == idStr {
-				events = append(events[:i], events[i+1:]...)
-				deleted = true
-				break
+		id, err := strconv.Atoi(idStr)
+
+		if err != nil {
+			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+
+		switch r.Method {
+
+		case http.MethodGet:
+
+			var event Event
+
+			err := db.QueryRow(
+				"SELECT id,user_id,event_type,page,timestamp FROM events WHERE id=$1",
+				id,
+			).Scan(
+				&event.Id,
+				&event.UserID,
+				&event.EventType,
+				&event.Page,
+				&event.Timestamp,
+			)
+
+			if err == sql.ErrNoRows {
+				http.Error(w, "event not found", http.StatusNotFound)
+				return
 			}
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(event)
+
+		case http.MethodDelete:
+
+			res, err := db.Exec(
+				"DELETE FROM event WHERE id=$1",
+				id,
+			)
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			count, _ := res.RowsAffected()
+
+			if count == 0 {
+				http.Error(w, "event not found", http.StatusNotFound)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"status": "deleted",
+			})
+
+		case http.MethodPut:
+
+			var event Event
+
+			// читаем JSON из запроса
+			err := json.NewDecoder(r.Body).Decode(&event)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			err = db.QueryRow(
+				"UPDATE event SET user_id=$2, event_type=$3, page=$4 WHERE id=$1 RETURNING id, user_id, event_type, page, timestamp",
+				id,
+				event.UserID,
+				event.EventType,
+				event.Page,
+			).Scan(
+				&event.Id,
+				&event.UserID,
+				&event.EventType,
+				&event.Page,
+				&event.Timestamp,
+			)
+
+			if err == sql.ErrNoRows {
+				http.Error(w, "event not found", http.StatusNotFound)
+				return
+			}
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(event)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+
 		}
 
-		if !deleted {
-			http.Error(w, "Event not found", http.StatusNotFound)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 	})
 
 	http.ListenAndServe(":9090", nil)
+
 }
