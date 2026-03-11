@@ -7,7 +7,7 @@ import (
 	"strconv"
 )
 
-func CreateEventHandler(db *sql.DB) http.HandlerFunc {
+func CreateEventHandler(service *EventService) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -24,24 +24,20 @@ func CreateEventHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		err = db.QueryRow(
-			"INSERT INTO event (user_id,event_type,page) VALUES ($1,$2,$3) RETURNING id,timestamp",
-			event.UserID,
-			event.EventType,
-			event.Page,
-		).Scan(&event.Id, &event.Timestamp)
+		err = service.CreateEvent(&event)
 
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(event)
-
 	}
 }
 
-func GetEventsHandler(db *sql.DB) http.HandlerFunc {
+func GetEventsHandler(service *EventService) http.HandlerFunc {
+
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		if r.Method != http.MethodGet {
@@ -49,43 +45,20 @@ func GetEventsHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query("SELECT id,user_id,event_type,page,timestamp FROM event")
+		events, err := service.GetEvents()
+
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		defer rows.Close()
-
-		var events []Event
-
-		for rows.Next() {
-
-			var e Event
-
-			err := rows.Scan(
-				&e.Id,
-				&e.UserID,
-				&e.EventType,
-				&e.Page,
-				&e.Timestamp,
-			)
-
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			events = append(events, e)
-		}
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(events)
-
 	}
 }
 
-func EventByIDHandler(db *sql.DB) http.HandlerFunc {
+func EventByIDHandler(service *EventService) http.HandlerFunc {
+
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		idStr := r.URL.Query().Get("id")
@@ -104,20 +77,10 @@ func EventByIDHandler(db *sql.DB) http.HandlerFunc {
 
 		switch r.Method {
 
+		// GET EVENT BY ID
 		case http.MethodGet:
 
-			var event Event
-
-			err := db.QueryRow(
-				"SELECT id,user_id,event_type,page,timestamp FROM events WHERE id=$1",
-				id,
-			).Scan(
-				&event.Id,
-				&event.UserID,
-				&event.EventType,
-				&event.Page,
-				&event.Timestamp,
-			)
+			event, err := service.GetEventByID(id)
 
 			if err == sql.ErrNoRows {
 				http.Error(w, "event not found", http.StatusNotFound)
@@ -132,22 +95,18 @@ func EventByIDHandler(db *sql.DB) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(event)
 
+		// DELETE EVENT
 		case http.MethodDelete:
 
-			res, err := db.Exec(
-				"DELETE FROM event WHERE id=$1",
-				id,
-			)
+			err := service.DeleteEvent(id)
 
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+			if err == sql.ErrNoRows {
+				http.Error(w, "event not found", http.StatusNotFound)
 				return
 			}
 
-			count, _ := res.RowsAffected()
-
-			if count == 0 {
-				http.Error(w, "event not found", http.StatusNotFound)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 
@@ -156,30 +115,19 @@ func EventByIDHandler(db *sql.DB) http.HandlerFunc {
 				"status": "deleted",
 			})
 
+		// UPDATE EVENT
 		case http.MethodPut:
 
 			var event Event
 
-			// читаем JSON из запроса
 			err := json.NewDecoder(r.Body).Decode(&event)
+
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 
-			err = db.QueryRow(
-				"UPDATE event SET user_id=$2, event_type=$3, page=$4 WHERE id=$1 RETURNING id, user_id, event_type, page, timestamp",
-				id,
-				event.UserID,
-				event.EventType,
-				event.Page,
-			).Scan(
-				&event.Id,
-				&event.UserID,
-				&event.EventType,
-				&event.Page,
-				&event.Timestamp,
-			)
+			err = service.UpdateEvent(id, &event)
 
 			if err == sql.ErrNoRows {
 				http.Error(w, "event not found", http.StatusNotFound)
@@ -193,9 +141,9 @@ func EventByIDHandler(db *sql.DB) http.HandlerFunc {
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(event)
+
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-
 		}
 	}
 }
